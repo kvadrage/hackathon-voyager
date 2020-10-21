@@ -381,7 +381,6 @@ class Voyager(NetlinkManagerWithListener):
              vrf_chain_remote += entry["vrf_table"]
         if entry["version"] == 6:    
             proto = "ipv6"
-        print("ROUTE ADD: ", entry)
         self.tc.route_add_encap(vrf_chain_remote, entry["idx"], proto, entry["dst_ip"], entry["src_mac"], entry["dst_mac"], entry["ifname"], entry["vxlan_id"], entry["vxlan_local_ip"], entry["vxlan_remote_ip"], entry["vxlan_port"])
         log.info("Added remote encap route entry (%d): %s %s %d %s" % 
                     (entry["idx"], entry["ifname"], entry["dst_ip"], entry["vrf_table"], entry["vxlan_remote_ip"]))
@@ -588,15 +587,13 @@ class Voyager(NetlinkManagerWithListener):
                 entry.update({
                         "type": "local"
                     })
-                # remove existing entry if was changed
+                # update only fdb entries, which were changed
                 if old_entry and old_entry.get("type", "unknown") != "unknown":
                     if (entry.get("type") == old_entry.get("type") and
                             entry.get("ifname") == old_entry.get("ifname") and
                             entry.get("vlan") == old_entry.get("vlan")):
-                        print("FDB Unhanged:", entry, old_entry)
                         return
                     else:
-                        print("FDB Changed:", entry, old_entry)
                         self.tc_fdb_del(old_entry)
             elif port["kind"] == "vxlan":
                 vxlan_id = port.get("vxlan_id")
@@ -617,16 +614,14 @@ class Voyager(NetlinkManagerWithListener):
                         "vxlan_local_ip": vxlan_local_ip,
                         "vxlan_remote_ip": str(vxlan_remote_ip)
                     })
-                # remove existing entry if was changed
+                # update only fdb entries, which were changed
                 if old_entry and old_entry.get("type", "unknown") != "unknown":
                     if (entry.get("type") == old_entry.get("type") and
                             entry.get("ifname") == old_entry.get("ifname") and
                             entry.get("vxlan_id") == old_entry.get("vxlan_id") and
                             entry.get("vxlan_remote_ip") == old_entry.get("vxlan_remote_ip")):
-                        print("FDB VXLAN Unchanged:", entry, old_entry)
                         return
                     else:
-                        print("FDB VXLAN Changed:", entry, old_entry)
                         self.tc_fdb_del(old_entry)
             else:
                 #log.warning("Unsupported port kind for the mac: %s %s (%s)" % (dst_mac, ifname, port["kind"]))
@@ -634,7 +629,6 @@ class Voyager(NetlinkManagerWithListener):
             self.fdb[dst_mac] = entry
             idx = self.fdb.keys().index(dst_mac)+1
             entry["idx"] = idx
-            print("MAC ADD:", entry)
             self.tc_fdb_add(entry)
         elif msg.family in (AF_INET, AF_INET6):
             version = msg.get_attribute_value(Neighbor.NDA_DST).version
@@ -649,13 +643,11 @@ class Voyager(NetlinkManagerWithListener):
             port = self.ports.get(ifname)
             # process only neighborts on regular VLAN interfaces
             if not (port and port.get("offloaded") and port["kind"] == "vlan"):
-                print("Neighbor port is not supported:", dst_ip, dst_mac, ifname, msg.get_states_string(msg.state))
                 return
             
             mac = self.fdb.get(dst_mac)
             # process only neighborts with valid fdb entries
             if not mac:
-                print("Neighbor MAC is not offloaded:", dst_ip, dst_mac, ifname, msg.get_states_string(msg.state))
                 return
             
             old_entry = dict(port["neighbors"].get(dst_ip, {}))
@@ -679,13 +671,11 @@ class Voyager(NetlinkManagerWithListener):
                         entry.get("ifname") == old_entry.get("ifname") and
                         entry.get("mac") == old_entry.get("mac") and
                         entry.get("vrf_table") == old_entry.get("vrf_table")):
-                    print("NEIGH Unchanged:", entry, old_entry)
                     return
                 else:
                     fdb_mac = old_entry.get("mac","")
                     if fdb_mac in self.fdb:
                         self.fdb[fdb_mac]["neigh"] = None
-                    print("NEIGH Changed:", entry, old_entry)
                     self.tc_neigh_del(old_entry)
 
             # update fdb entry with its neighbor IP as well
@@ -711,9 +701,9 @@ class Voyager(NetlinkManagerWithListener):
                         ifindex = get_ifindex(neigh.get("ifname",""))
                         self.tc_neigh_del(neigh)
                         if family and ifindex:
-                            print(family, ifindex, neigh["dst_ip"])
                             self.neighbor_get(family, ifindex, IPAddress(neigh["dst_ip"]))
-                self.tc_fdb_del(entry)
+                # keep it for now
+                # self.tc_fdb_del(entry)
         elif msg.family in (AF_INET, AF_INET6):
             port = self.ports.get(ifname)
             if not port:
@@ -739,7 +729,7 @@ class Voyager(NetlinkManagerWithListener):
             return
         gw_neigh = port["neighbors"].get(gw)
         if not (gw_neigh and gw_neigh["type"] == "vxlan"):
-            print("ROUTE port is not supported", dst_ip, gw, out_ifname, vrf_table, gw_neigh)
+            # skip non-vxlan routes
             return
         version = gw_neigh.get("version")
         src_mac = gw_neigh.get("src_mac")
@@ -747,7 +737,7 @@ class Voyager(NetlinkManagerWithListener):
         fdb_ifname = gw_neigh.get("fdb_ifname")
         l3vni_port = self.ports.get(fdb_ifname)
         if not (src_mac and dst_mac and fdb_ifname and l3vni_port and l3vni_port["kind"] == "vxlan" and l3vni_port["vrf_table"] == vrf_table):
-            print("ROUTE port is not offloaded", dst_ip, gw, out_ifname, vrf_table, gw_neigh, l3vni_port)
+            # skip routes without essential information for offloads
             return
         old_entry = dict(self.routes.get(dst_ip, {}))
         entry = self.routes.get(dst_ip, {
@@ -765,14 +755,13 @@ class Voyager(NetlinkManagerWithListener):
             })
         # remove existing entry if was changed
         if old_entry:
+            # update only changed routes 
             if (entry.get("type") == old_entry.get("type") and
                     entry.get("ifname") == old_entry.get("ifname") and
                     entry.get("dst_mac") == old_entry.get("dst_mac") and
                     entry.get("vrf_table") == old_entry.get("vrf_table")):
-                print("ROUTE Unchanged:", entry, old_entry)
                 return
             else:
-                print("NEIGH Changed:", entry, old_entry)
                 self.tc_route_del(old_entry)
         self.routes[dst_ip] = entry
         idx = self.routes.keys().index(dst_ip)+1
